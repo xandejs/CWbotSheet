@@ -2,12 +2,9 @@ name: Bot Craft World
 
 on:
   schedule:
-    # A cada hora — acompanha o ritmo de coleta da aba "Dados" (1 registro/hora).
-    # O próprio bot já limita repetição de sinal pro mesmo item (mín. 4h/3%
-    # de variação), então rodar de hora em hora não gera spam de sinais.
-    - cron: "0 * * * *"
-  workflow_dispatch: {}   # permite rodar manualmente pra testar antes de deixar no cron
-
+    - cron: "0 */2 * * *"
+  workflow_dispatch: {}
+  
 jobs:
   rodar-bot:
     runs-on: ubuntu-latest
