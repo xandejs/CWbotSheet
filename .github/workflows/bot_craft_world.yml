@@ -1,0 +1,42 @@
+name: Bot Craft World
+
+on:
+  schedule:
+    # A cada hora — acompanha o ritmo de coleta da aba "Dados" (1 registro/hora).
+    # O próprio bot já limita repetição de sinal pro mesmo item (mín. 4h/3%
+    # de variação), então rodar de hora em hora não gera spam de sinais.
+    - cron: "0 * * * *"
+  workflow_dispatch: {}   # permite rodar manualmente pra testar antes de deixar no cron
+
+jobs:
+  rodar-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      # Cache incremental de indicadores + modelo pooled (ver CACHE_DIR no
+      # bot). Chave única por execução (run_id) + restore-keys pra sempre
+      # restaurar o cache mais recente e nunca perder o estado entre ciclos.
+      - name: Restaurar cache incremental
+        uses: actions/cache@v4
+        with:
+          path: cache_craft_world
+          key: cache-craft-world-${{ github.run_id }}
+          restore-keys: |
+            cache-craft-world-
+
+      - name: Rodar bot
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot_craft_world.py
