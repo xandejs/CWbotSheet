@@ -1,0 +1,7 @@
+pandas
+numpy
+xgboost
+gspread
+oauth2client
+gspread-formatting
+requests
