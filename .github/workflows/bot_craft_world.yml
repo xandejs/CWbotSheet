@@ -2,9 +2,12 @@ name: Bot Craft World
 
 on:
   schedule:
+    # A cada 2h (UTC) — acompanha o ritmo de coleta da aba "Dados" (1 registro/hora).
+    # O próprio bot já limita repetição de sinal pro mesmo item (mín. 4h/3%
+    # de variação), então rodar de 2 em 2h não gera spam de sinais.
     - cron: "0 */2 * * *"
-  workflow_dispatch: {}
-  
+  workflow_dispatch: {}   # permite rodar manualmente pra testar antes de deixar no cron
+
 jobs:
   rodar-bot:
     runs-on: ubuntu-latest
@@ -22,6 +25,9 @@ jobs:
       - name: Instalar dependências
         run: pip install -r requirements.txt
 
+      # Cache incremental de indicadores + modelo pooled (ver CACHE_DIR no
+      # bot). Chave única por execução (run_id) + restore-keys pra sempre
+      # restaurar o cache mais recente e nunca perder o estado entre ciclos.
       - name: Restaurar cache incremental
         uses: actions/cache@v4
         with:
