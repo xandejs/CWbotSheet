@@ -132,6 +132,18 @@ HEADERS_SINAIS_IA = [
     "Preco_Final", "Estado_RL_Continuo"
 ]
 
+# --- Sinais_Hoje: dashboard de estado ATUAL (não é histórico) ---
+# Sobrescrita por inteiro a cada ciclo via salvar_aba_atomica — mostra a
+# recomendação corrente de TODO item, mesmo os que não disparam alerta em
+# Sinais_IA (ESPERAR / PERTO DA ENTRADA / VETADO / etc.). Reintroduzida a
+# pedido: existia no bot original (Sunflower Land) como "Sinais_Hoje" e
+# tinha sido cortada nesta adaptação por não depender de estoque.
+HEADERS_SINAIS_HOJE = [
+    "Timestamp", "Item", "Preco_Atual", "Acao", "ROI_Previsto_%",
+    "Media_Macro", "Alvo_Entrada", "Alvo_Saida", "Recomendacao_API",
+    "Concorda_API", "Estado_RL", "Em_Crash"
+]
+
 # --- Recomendação da API (linha de "Dados") -> feature numérica ---
 # TODO: confirmar todos os rótulos possíveis que a API devolve (só vimos
 # "BUY" no exemplo). Rótulo desconhecido cai em 0 (neutro) via fillna.
@@ -1226,6 +1238,9 @@ if linhas_ignoradas_dedup > 0:
     print(f"⚠️  {linhas_ignoradas_dedup} linha(s) de Sinais_IA ignorada(s) ao montar mapa_ultimo_sinal "
           f"(dado corrompido) — dedup de 4h/3% seguiu normal para as demais linhas.")
 
+agora_ciclo = obter_agora_brt()   # timestamp único do ciclo — reusado no snapshot Sinais_Hoje e no disparo de sinais
+linhas_sinais_hoje = []           # snapshot do estado atual de CADA item, sobrescrito por inteiro no fim do ciclo
+
 for item in df_ranking['Item']:
     d_it = cache_indicadores.get(item)
     if d_it is None or d_it.empty:
@@ -1278,8 +1293,27 @@ for item in df_ranking['Item']:
     if em_crash and "COMPRAR" in acao:
         acao = f"⚠️ COMPRAR (QUEDA {var24h:.1f}% em 24h)"
 
+    # --- Snapshot Sinais_Hoje: registra TODO item, dispare alerta ou não ---
+    recomendacao_raw_hoje = row.get('Recomendacao_API', '')
+    if "COMPRAR" in acao:
+        tipo_interpretado_hoje = "COMPRA"
+    elif "VENDER" in acao:
+        tipo_interpretado_hoje = "VENDA"
+    else:
+        tipo_interpretado_hoje = None
+    concorda_label_hoje = (
+        avaliar_concordancia_api(tipo_interpretado_hoje, recomendacao_raw_hoje)[0]
+        if tipo_interpretado_hoje else "N/A"
+    )
+    linhas_sinais_hoje.append([
+        agora_ciclo.strftime("%d/%m/%Y %H:%M"), item, round(preco_atual, 4), acao,
+        round(roi_pred_exibido, 2), round(row['Media_Macro'], 4),
+        round(alvo_in, 4), round(alvo_out, 4), recomendacao_raw_hoje, concorda_label_hoje,
+        estado_rl, "SIM" if em_crash else "NÃO"
+    ])
+
     if acao in ["🟢 COMPRAR", "🔴 VENDER"] or (em_crash and "COMPRAR" in acao):
-        agora_brt = obter_agora_brt()
+        agora_brt = agora_ciclo
         dt_hoje_str = agora_brt.strftime("%d%m%Y")
         dt_hhmm = agora_brt.strftime("%H%M")
         tipo_sinal = "COMPRA" if "COMPRAR" in acao else "VENDA"
@@ -1328,6 +1362,17 @@ for item in df_ranking['Item']:
 if novas_linhas_sinais:
     ws_val.append_rows(novas_linhas_sinais, value_input_option='USER_ENTERED')
     print(f"📌 {len(novas_linhas_sinais)} novos sinais integrados para monitorização (Sinais_IA).")
+
+# --- Sinais_Hoje: dashboard do estado atual, sobrescrito por inteiro ---
+try:
+    ok_hoje = salvar_aba_atomica(
+        sh, "Sinais_Hoje", HEADERS_SINAIS_HOJE, linhas_sinais_hoje,
+        rows_est=len(linhas_sinais_hoje) + 50, cols_est=len(HEADERS_SINAIS_HOJE)
+    )
+    print(f"📸 Sinais_Hoje atualizada: {len(linhas_sinais_hoje)} itens." if ok_hoje
+          else "⚠️ Sinais_Hoje não foi atualizada neste ciclo — versão anterior preservada.")
+except Exception as e:
+    print(f"❌ Erro ao salvar Sinais_Hoje: {e}")
 
 # ==============================================================================
 # 5. PERSISTÊNCIA — XGB_Audit, Cerebro_RL, Cerebro_RL_Item
