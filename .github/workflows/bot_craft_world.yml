@@ -5,7 +5,7 @@ on:
     # A cada 2h (UTC) — acompanha o ritmo de coleta da aba "Dados" (1 registro/hora).
     # O próprio bot já limita repetição de sinal pro mesmo item (mín. 4h/3%
     # de variação), então rodar de 2 em 2h não gera spam de sinais.
-    - cron: "0 */2 * * *"
+    - cron: '*/30 * * * *'
   workflow_dispatch: {}   # permite rodar manualmente pra testar antes de deixar no cron
 
 jobs:
