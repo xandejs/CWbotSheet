@@ -15,9 +15,11 @@ O QUE FOI REMOVIDO em relação ao bot original (por depender de estoque):
     não possuísse nada, gerando sinais de COMPRA (zona de entrada) e VENDA
     (zona de saída) puramente estatísticos/preço
   - Stop-loss por prejuízo de posição (dependia de custo médio)
-  - Abas Alocacao_Recursos, Portfolio_Correlacao, Debug_Decisao e
-    Sinais_Hoje (dashboard) — só ficam as 4 abas pedidas:
-    Sinais_IA, Cerebro_RL, Cerebro_RL_Item, XGB_Audit
+  - Abas Portfolio_Correlacao e Debug_Decisao. As abas do bot são:
+    Sinais_IA, Cerebro_RL, Cerebro_RL_Item, XGB_Audit, mais Sinais_Hoje
+    (estado atual de cada item) e Alocacao_Recursos (ranking de em quais itens
+    vale se expor, pelo histórico de acerto e ROI — reintroduzida a pedido,
+    reescrita sem estoque; ver calcular_alocacao_recursos)
   - Índice de correlação entre insumos (MAPA_RECEITA / Wood→Stone→Iron):
     deixado de fora por enquanto — ver seção "EXTENSÃO FUTURA" abaixo.
 
@@ -464,6 +466,147 @@ def calcular_roi_real(tipo, preco_sinal, preco_final):
         venda_liquida = preco_final * (1 - TAXA_MARKETPLACE)
         return ((venda_liquida - preco_sinal) / preco_sinal) * 100
     return ((preco_sinal - preco_final) / preco_sinal) * 100
+
+
+# ==============================================================================
+# ALOCAÇÃO DE RECURSOS — em quais itens vale mais se expor (aba Alocacao_Recursos)
+# ==============================================================================
+# Adaptada da Alocacao_Recursos do bot do SFL, com três diferenças pensadas
+# para o Craft World (sem estoque, swing curto, sinais frequentes):
+#
+#  1) SÓ SINAIS DE COMPRA entram: "se expor" = comprar. Os sinais de VENDA
+#     continuam em Sinais_IA, mas não dizem onde alocar capital.
+#  2) RETORNO POR DIA, não anualizado composto. Com swing de 5 dias,
+#     (1+ROI)^(365/dias) estoura qualquer teto em quase todo item e o ranking
+#     viraria só "quem tem mais confiança". Aqui: Retorno_Dia_% = ROI líquido
+#     médio / dias médios da posição — não satura e é fácil de ler.
+#  3) EPISÓDIOS INDEPENDENTES: o bot pode emitir vários sinais de compra do
+#     mesmo item na mesma queda (dedup de 4h/3%), e todos medem o MESMO
+#     movimento de preço. Contá-los como amostras separadas inflaria a taxa de
+#     acerto e a confiança. Dentro de cada janela de ALOCACAO_EPISODIO_H horas
+#     conta só o primeiro sinal do item. N_Sinais é o total bruto; N_Episodios
+#     é o que realmente entra nas contas.
+#
+# Como cada coluna é calculada (só sinais de COMPRA já concluídos):
+#   Taxa_Acerto_%   acertos (🏆 ou 💰) / episódios, SUAVIZADA por um prior
+#                   bayesiano (puxa amostras pequenas para a média geral:
+#                   2 de 2 não vira 100%). N_Acertos mostra a contagem crua.
+#   ROI_Medio_%     ROI líquido da taxa do marketplace, vendendo ao preço de
+#                   mercado no momento em que o sinal foi resolvido
+#                   (Preco_Final) — ou seja, "comprei no sinal e segurei".
+#   ROI_Mediano_%   mesma conta pela mediana (não deixa 1 ganho enorme mascarar
+#                   vários prejuízos)
+#   Dias_Medio      dias de posição até a resolução (Dias_Passados)
+#   Acerto_API_*    taxa de acerto quando a recomendação da API concordava /
+#                   discordava do nosso sinal (em branco com menos de
+#                   ALOCACAO_MIN_N_API episódios) — mostra se a API agrega.
+#   Situacao        AMOSTRA PEQUENA (< ALOCACAO_MIN_EPISODIOS) / EXPOR /
+#                   EXPOR (BAIXA CONFIANÇA) / EVITAR (ROI médio ou mediano
+#                   <= 0) / SEM ROI (sem Preco_Final nos sinais)
+#   Score           Retorno_Dia_% x confiança (taxa suavizada; metade dela se
+#                   a amostra ainda é pequena demais para confiar). Só itens
+#                   EXPOR pontuam.
+#   Peso_Alocacao_% Score do item / soma dos Scores = fatia sugerida.
+ALOCACAO_MIN_EPISODIOS = 3
+ALOCACAO_EPISODIO_H = 24
+ALOCACAO_MIN_N_API = 3
+
+HEADERS_ALOCACAO = [
+    "Item", "N_Sinais", "N_Episodios", "N_Acertos", "Taxa_Acerto_%", "ROI_Medio_%",
+    "ROI_Mediano_%", "Dias_Medio", "Retorno_Dia_%", "Acerto_API_Concorda_%",
+    "Acerto_API_Discorda_%", "Situacao", "Score", "Peso_Alocacao_%"
+]
+
+
+def calcular_alocacao_recursos(df_val_mem, min_episodios=ALOCACAO_MIN_EPISODIOS,
+                                episodio_h=ALOCACAO_EPISODIO_H, min_n_api=ALOCACAO_MIN_N_API):
+    """Ranking de itens por histórico de acerto e ROI (ver bloco de comentários acima).
+    Valores ausentes saem como "" (a API do Sheets não aceita NaN)."""
+    vazio = pd.DataFrame(columns=HEADERS_ALOCACAO)
+    if df_val_mem is None or df_val_mem.empty:
+        return vazio
+
+    d = df_val_mem[(df_val_mem['Tipo'].astype(str).str.upper() == "COMPRA")
+                   & df_val_mem['Status'].astype(str).str.contains("🏆|❌|💰", na=False)].copy()
+    if d.empty:
+        return vazio
+
+    d['Data'] = d['Data_Sinal'].apply(parse_data_sinal_robusta)
+    d = d.dropna(subset=['Data'])
+    if d.empty:
+        return vazio
+
+    d['Pts'] = d['Status'].astype(str).apply(lambda st: 1.0 if "🏆" in st else (0.5 if "💰" in st else 0.0))
+    d['Acerto'] = d['Pts'] >= 0.5
+    preco_sinal = d['Preco_Sinal'].apply(limpar_numero)
+    preco_final = d['Preco_Final'].apply(limpar_numero)
+    d['ROI'] = [calcular_roi_real("COMPRA", a, b) if (a > 0 and b > 0) else np.nan
+                for a, b in zip(preco_sinal, preco_final)]
+    d['Dias'] = d['Dias_Passados'].apply(limpar_numero)
+
+    # Episódios independentes: dentro de cada janela de `episodio_h` horas, só o primeiro sinal do item.
+    d = d.sort_values(['Item', 'Data'])
+    indices_ep = []
+    for _, g in d.groupby('Item', sort=False):
+        inicio = None
+        for idx, t in g['Data'].items():
+            if inicio is None or (t - inicio) >= pd.Timedelta(hours=episodio_h):
+                indices_ep.append(idx)
+                inicio = t
+    d_ep = d.loc[indices_ep]
+
+    prior_a, prior_b = calcular_prior_empirico(d_ep)
+    n_bruto_por_item = d.groupby('Item').size().to_dict()
+
+    linhas = []
+    for item, ge in d_ep.groupby('Item'):
+        n = len(ge)
+        n_acertos = int(ge['Acerto'].sum())
+        taxa_ef, confiante, _ = calcular_taxa_confianca(
+            n, n_acertos, ge['Pts'].sum(), prior_a=prior_a, prior_b=prior_b
+        )
+
+        rois = ge['ROI'].dropna()
+        roi_medio = float(rois.mean()) if not rois.empty else np.nan
+        roi_mediano = float(rois.median()) if not rois.empty else np.nan
+        dias_validos = ge.loc[ge['Dias'] > 0, 'Dias']
+        dias_medio = max(float(dias_validos.mean()), 1.0) if not dias_validos.empty else float(DIAS_SWING)
+        retorno_dia = (roi_medio / dias_medio) if pd.notna(roi_medio) else np.nan
+
+        def acerto_api(rotulo):
+            sub = ge[ge['Concorda_API'].astype(str).str.strip() == rotulo]
+            return round(float(sub['Acerto'].mean()) * 100, 1) if len(sub) >= min_n_api else np.nan
+
+        score = 0.0
+        if n < min_episodios:
+            situacao = "AMOSTRA PEQUENA"
+        elif pd.isna(roi_medio):
+            situacao = "SEM ROI"
+        elif roi_medio > 0 and roi_mediano > 0:
+            peso_confianca = taxa_ef if confiante else taxa_ef * 0.5
+            score = retorno_dia * peso_confianca
+            situacao = "EXPOR" if confiante else "EXPOR (BAIXA CONFIANÇA)"
+        else:
+            situacao = "EVITAR"
+
+        linhas.append({
+            "Item": item, "N_Sinais": int(n_bruto_por_item.get(item, n)), "N_Episodios": n,
+            "N_Acertos": n_acertos, "Taxa_Acerto_%": round(taxa_ef * 100, 1),
+            "ROI_Medio_%": round(roi_medio, 2) if pd.notna(roi_medio) else np.nan,
+            "ROI_Mediano_%": round(roi_mediano, 2) if pd.notna(roi_mediano) else np.nan,
+            "Dias_Medio": round(dias_medio, 1),
+            "Retorno_Dia_%": round(retorno_dia, 3) if pd.notna(retorno_dia) else np.nan,
+            "Acerto_API_Concorda_%": acerto_api("SIM"), "Acerto_API_Discorda_%": acerto_api("NÃO"),
+            "Situacao": situacao, "Score": round(score, 4),
+        })
+
+    df = pd.DataFrame(linhas)
+    soma_score = df['Score'].sum()
+    df['Peso_Alocacao_%'] = (df['Score'] / soma_score * 100).round(2) if soma_score > 0 else 0.0
+    df = (df.sort_values(['Peso_Alocacao_%', 'Score', 'N_Episodios', 'Item'],
+                         ascending=[False, False, False, True])
+            .reset_index(drop=True)[HEADERS_ALOCACAO])
+    return df.astype(object).where(df.notna(), "")
 
 
 # ==============================================================================
@@ -1168,6 +1311,30 @@ if not df_val.empty:
         ws_val = sh.worksheet("Sinais_IA")
     else:
         print("⚠️ Sinais_IA não foi atualizada neste ciclo — dados anteriores preservados.")
+
+    # ------------------------------------------------------------------
+    # Alocacao_Recursos: em quais itens vale mais se expor (ver bloco de
+    # comentários da função). Sobrescrita por inteiro a cada ciclo.
+    # ------------------------------------------------------------------
+    try:
+        df_aloc = calcular_alocacao_recursos(df_val)
+        try:
+            ws_aloc = sh.worksheet("Alocacao_Recursos")
+        except gspread.exceptions.WorksheetNotFound:
+            ws_aloc = sh.add_worksheet(title="Alocacao_Recursos", rows=str(max(len(df_aloc) + 100, 300)),
+                                        cols=str(len(HEADERS_ALOCACAO)))
+            set_frozen(ws_aloc, rows=1)
+            format_cell_range(ws_aloc, 'A1:N1', CellFormat(textFormat=TextFormat(bold=True)))
+        ws_aloc.clear()
+        ws_aloc.update(values=[HEADERS_ALOCACAO] + df_aloc.values.tolist(),
+                       range_name='A1', value_input_option='USER_ENTERED')
+        if df_aloc.empty:
+            print("💰 Alocacao_Recursos: aguardando sinais de compra concluídos.")
+        else:
+            n_expor = int((df_aloc['Situacao'].astype(str).str.startswith("EXPOR")).sum())
+            print(f"💰 Alocacao_Recursos: {len(df_aloc)} itens | {n_expor} recomendados para exposição.")
+    except Exception as e:
+        print(f"⚠️ Erro ao calcular/gravar Alocacao_Recursos: {e}")
 
     # ------------------------------------------------------------------
     # Recompensa combinada do Cérebro RL: preço realizado + concordância API
