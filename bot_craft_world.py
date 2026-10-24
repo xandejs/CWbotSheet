@@ -199,8 +199,8 @@ def enviar_telegram(acao, ativo, preco, id_sinal):
     # TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID: configuráveis via variável de
     # ambiente (GitHub Actions secret) — os valores fixos abaixo só entram
     # como fallback pra rodar localmente sem precisar configurar nada.
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "8715722660:AAGgJSl2w2RpM0kxZ9Y4MFK4lHpDZaLyQmw")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "873167793")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
     preco_formatado = f"{preco:.4f}".replace('.', ',')
 
