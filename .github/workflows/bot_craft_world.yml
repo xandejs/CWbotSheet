@@ -1,16 +1,24 @@
 name: Bot Craft World
 
+# O disparo é feito pelo Apps Script (gatilhoBotCW, a cada 15 min, via workflow_dispatch).
+# NÃO reative o `schedule:` abaixo junto com o Apps Script: duplicaria execuções.
+
 on:
-  schedule:
-    # A cada 2h (UTC) — acompanha o ritmo de coleta da aba "Dados" (1 registro/hora).
-    # O próprio bot já limita repetição de sinal pro mesmo item (mín. 4h/3%
-    # de variação), então rodar de 2 em 2h não gera spam de sinais.
-    - cron: '*/15 * * * *'
-  workflow_dispatch: {}   # permite rodar manualmente pra testar antes de deixar no cron
+  workflow_dispatch: {}
+
+  # schedule:
+  #   - cron: '*/15 * * * *'
+
+# Uma execução por vez. Não cancela a que está rodando; a seguinte entra na fila.
+concurrency:
+  group: craft-world-bot
+  cancel-in-progress: false
 
 jobs:
   rodar-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 10   # reduza depois de medir o tempo real (ex.: 2x a duração normal)
+
     steps:
       - name: Checkout do repositório
         uses: actions/checkout@v4
@@ -25,9 +33,7 @@ jobs:
       - name: Instalar dependências
         run: pip install -r requirements.txt
 
-      # Cache incremental de indicadores + modelo pooled (ver CACHE_DIR no
-      # bot). Chave única por execução (run_id) + restore-keys pra sempre
-      # restaurar o cache mais recente e nunca perder o estado entre ciclos.
+      # Cache incremental de indicadores + modelo pooled (ver CACHE_DIR no bot).
       - name: Restaurar cache incremental
         uses: actions/cache@v4
         with:
@@ -41,4 +47,5 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONUNBUFFERED: "1"
         run: python bot_craft_world.py
