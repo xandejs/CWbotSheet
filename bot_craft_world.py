@@ -54,18 +54,21 @@ cache incremental de indicadores, modelo XGBoost pooled (1 modelo pra
 todos os itens), escrita atômica.
 
 VALORES CONFIRMADOS (Craft World, não são mais suposição do SFL):
-  - REGISTROS_POR_DIA = 24 — continua valendo mesmo com a coleta e o bot
-    rodando a cada 15 min: normalizar_grade_horaria reduz a aba Dados a 1
-    linha por item por hora (último preço da hora) ANTES de qualquer
-    cálculo, então o histórico antigo (horário, ~2 meses) e os registros
-    novos (15 min) ficam na mesma escala. A hora em andamento é regravada
-    a cada ciclo, então o sinal é reavaliado a cada 15 min com o preço mais
-    recente
-  - TAXA_MARKETPLACE = 0.05 — 5% confirmado
+  - GRADE NATIVA DE 15 MIN: a coleta (aba Dados) e o bot rodam a cada 15 min,
+    e o bot trabalha numa grade uniforme de 15 min (PASSO_MIN) — 1 linha =
+    15 min, REGISTROS_POR_DIA = 96. TODAS as janelas são definidas em TEMPO
+    (horas/dias) e convertidas em linhas por REGISTROS_POR_HORA, então
+    mudar PASSO_MIN muda a resolução sem reescrever o resto.
+    O histórico antigo (~2 meses, 1 registro/hora) é aproveitado repetindo o
+    último preço conhecido até o próximo registro (normalizar_grade; lacunas
+    maiores que LIMITE_FFILL_REG ficam vazias em vez de inventadas). Lags
+    são em HORAS (1h/2h/3h atrás), não em linhas, pra a feature significar a
+    mesma coisa no histórico horário e nos dados de 15 min.
+  - TAXA_MARKETPLACE = 0.1 — 10% (ver constante abaixo)
   - DIAS_SWING reduzido de 12 (SFL) pra 5: o Craft World é mais dinâmico
     e o próprio evento de demanda (masterpiece) já se resolve em até 3
     dias — 5 dias dá uma folga além do próprio evento pro preço reverter,
-    sem herdar a janela de 12 dias do jogo antigo. JANELA_EVENTO_H (72h /
+    sem herdar a janela de 12 dias do jogo antigo. JANELA_EVENTO_H (72 h /
     3 dias) amarra o holdout do XGBoost e a janela de auditoria a esse
     mesmo ciclo. As janelas de Média/RSI (JANELA_MACRO_DIAS/
     JANELA_MICRO_DIAS) também foram encurtadas — não é preciso usar os
@@ -104,11 +107,23 @@ from gspread_formatting import set_frozen, format_cell_range, CellFormat, TextFo
 SPREADSHEET_ID = "1NjtxK3HgsnT2DiI7NEEHS1NCrwcJAedqB4c4YDiBrbU"   # CRAFT WORLD
 ABA_DADOS = "Dados"    # equivalente ao RecLog do bot antigo — só leitura
 
-REGISTROS_POR_DIA = 24         # confirmado: 1 registro/hora
-TAXA_MARKETPLACE = 0.1        # confirmado: 5% — usado só pra calcular meta de venda acima da média, sem ligação com estoque
+# --- Grade de tempo: coleta e bot a cada 15 min ---
+PASSO_MIN = 15                               # granularidade nativa da grade
+REGISTROS_POR_HORA = 60 // PASSO_MIN         # 4 linhas = 1 hora
+REGISTROS_POR_DIA = 24 * REGISTROS_POR_HORA  # 96 linhas = 1 dia
+# Lacuna máxima (em linhas) preenchida repetindo o último preço conhecido.
+# 2h cobre o histórico horário (3 linhas entre dois registros) e uma falha
+# curta de coleta; lacunas maiores ficam vazias (NaN) e são ignoradas.
+LIMITE_FFILL_REG = 2 * REGISTROS_POR_HORA
+# Treino do XGBoost usa 1 linha a cada TREINO_PASSO_MIN min: o alvo é o preço
+# daqui a DIAS_SWING dias, então as 4 linhas de uma mesma hora são quase
+# cópias. Use PASSO_MIN pra treinar com todas (mais lento, sem ganho óbvio).
+TREINO_PASSO_MIN = 60
+TAXA_MARKETPLACE = 0.1         # 10% (definido por você no repositório em 24/10; antes 5%) — só entra no cálculo de meta de venda acima da média, sem ligação com estoque
 
 # --- Ciclo de referência: masterpieces duram no máximo 3 dias ---
-JANELA_EVENTO_H = 3 * REGISTROS_POR_DIA   # 72 registros/horas — holdout do XGBoost e janela de auditoria usam esse ciclo
+JANELA_EVENTO_H = 72                                     # HORAS — holdout do XGBoost e janela de auditoria usam esse ciclo
+JANELA_EVENTO_REG = JANELA_EVENTO_H * REGISTROS_POR_HORA # a mesma janela em linhas (288)
 
 DIAS_SWING = 5                 # reduzido de 12 (SFL) — ver docstring "VALORES CONFIRMADOS"
 SHIFT_ALVO = DIAS_SWING * REGISTROS_POR_DIA
@@ -119,8 +134,8 @@ DIAS_MAX_MONITORAMENTO = 12
 # vender-acima-da-média. Derivadas de DIAS_SWING pra escalar junto se ele mudar.
 JANELA_MACRO_DIAS = DIAS_SWING * 3   # 15 dias — referência da média/desvio da banda
 JANELA_MICRO_DIAS = DIAS_SWING       # 5 dias — RSI mais responsivo que os 10 dias do SFL
-MACRO_MIN_PERIODS = 60               # ~16% da janela macro (mesma proporção do bot original)
-MICRO_MIN_PERIODS = 24               # ~20% da janela micro (mesma proporção do bot original)
+MACRO_MIN_PERIODS = 60 * REGISTROS_POR_HORA   # 60 h  (~16% da janela macro, mesma proporção do bot original)
+MICRO_MIN_PERIODS = 24 * REGISTROS_POR_HORA   # 24 h  (~20% da janela micro, mesma proporção do bot original)
 
 LUCRO_DESEJADO_MINIMO = 0.03    # piso da meta de lucro dinâmica (itens de baixa volatilidade)
 LUCRO_DESEJADO_MAXIMO = 0.20    # teto da meta de lucro dinâmica (itens de alta volatilidade / masterpiece)
@@ -135,6 +150,18 @@ HEADERS_SINAIS_IA = [
     "Lucro_Desejado_%", "Recomendacao_API", "Concorda_API", "Monitoramento",
     "Status", "Dias_Passados", "Estado_RL", "Chave_Unica", "Dias_Ate_Alvo",
     "Preco_Final", "Estado_RL_Continuo"
+]
+
+# --- Sinais_Hoje: dashboard de estado ATUAL (não é histórico) ---
+# Sobrescrita por inteiro a cada ciclo via salvar_aba_atomica — mostra a
+# recomendação corrente de TODO item, mesmo os que não disparam alerta em
+# Sinais_IA (ESPERAR / PERTO DA ENTRADA / VETADO / etc.). Reintroduzida a
+# pedido: existia no bot original (Sunflower Land) como "Sinais_Hoje" e
+# tinha sido cortada nesta adaptação por não depender de estoque.
+HEADERS_SINAIS_HOJE = [
+    "Timestamp", "Item", "Preco_Atual", "Acao", "ROI_Previsto_%",
+    "Media_Macro", "Alvo_Entrada", "Alvo_Saida", "Recomendacao_API",
+    "Concorda_API", "Estado_RL", "Em_Crash"
 ]
 
 # --- Recomendação da API (linha de "Dados") -> feature numérica ---
@@ -201,6 +228,9 @@ def enviar_telegram(acao, ativo, preco, id_sinal):
     # como fallback pra rodar localmente sem precisar configurar nada.
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print("⚠️ TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID não configurados — alerta não enviado.")
+        return
 
     preco_formatado = f"{preco:.4f}".replace('.', ',')
 
@@ -413,13 +443,14 @@ def calcular_margem_atencao(alvo_in, alvo_out, fracao=0.15, minimo_abs=0.0001, m
 
 
 def detectar_regime(d_item, janela_crash_h=24, limiar_queda=-0.12):
-    if d_item is None or len(d_item) < janela_crash_h:
+    n_linhas = janela_crash_h * REGISTROS_POR_HORA   # janela em HORAS -> linhas da grade
+    if d_item is None or len(d_item) < n_linhas:
         return False, 0.0
 
     preco_atual = d_item.iloc[-1]['Price']
-    preco_24h = d_item.iloc[-janela_crash_h]['Price']
+    preco_24h = d_item.iloc[-n_linhas]['Price']
 
-    if preco_24h == 0:
+    if pd.isna(preco_24h) or pd.isna(preco_atual) or preco_24h == 0:
         return False, 0.0
 
     variacao_24h = (preco_atual - preco_24h) / preco_24h
@@ -556,23 +587,23 @@ def construir_estado_rl_continuo_craft(row_mercado, roi_pred, alvo_in, alvo_out,
 # CACHE INCREMENTAL DE INDICADORES (herdado, sem alteração estrutural)
 # ==============================================================================
 
-def normalizar_grade_horaria(df):
+def normalizar_grade(df):
     """
-    Reduz a aba Dados a UMA linha por item por hora (o último preço e a
-    última recomendação da API dentro daquela hora).
+    Converte a aba Dados numa grade UNIFORME de PASSO_MIN minutos, por item.
 
-    Por quê: todo o resto do bot (janelas de média/RSI, Lags, Var_72h,
-    SHIFT_ALVO, holdout, regra "3 horas no alvo") conta LINHAS e assume
-    1 linha = 1 hora (REGISTROS_POR_DIA = 24). Com a coleta a cada 15 min
-    — e os 2 meses de histórico antigos ainda em cadência horária — essas
-    contagens mudariam de significado e misturariam duas escalas. Fixar a
-    grade em 1 hora preserva o histórico e mantém todos os parâmetros
-    valendo, enquanto o bot continua rodando a cada 15 min: a hora em
-    andamento sempre carrega o preço mais recente, então o sinal da hora
-    atual é reavaliado a cada ciclo.
+    1) Cada registro vai pro balde de PASSO_MIN min em que caiu; se vários
+       caem no mesmo balde, vale o último (preço e recomendação da API).
+    2) Entre o primeiro e o último balde de cada item, os baldes sem registro
+       repetem o último preço conhecido por até LIMITE_FFILL_REG linhas. É o
+       que aproveita os ~2 meses de histórico horário (3 linhas repetidas
+       entre dois registros). Lacunas maiores ficam NaN — o bot ignora essas
+       linhas no treino em vez de inventar preço.
 
-    O Timestamp resultante é o início da hora (17:48:25 -> 17:00:00).
+    O Timestamp resultante é o início do balde (17:48:25 -> 17:45:00). A grade
+    de cada item termina no último registro real dele, então a última linha
+    sempre é um preço observado.
     """
+    colunas = ['Timestamp', 'Item', 'Price', 'Recomendacao_API']
     d = df.copy()
     ts = pd.to_datetime(d['Timestamp'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
     faltou = ts.isna()
@@ -580,18 +611,31 @@ def normalizar_grade_horaria(df):
         ts[faltou] = pd.to_datetime(d.loc[faltou, 'Timestamp'], dayfirst=True, errors='coerce')
     d['Timestamp'] = ts
     d = d.dropna(subset=['Timestamp'])
-    d = d[d['Price'] > 0]   # linha com preço ilegível (limpar_numero -> 0) não pode virar o "último preço" da hora
-    d['Hora'] = d['Timestamp'].dt.floor('h')
-    d = d.sort_values('Timestamp').groupby(['Item', 'Hora'], as_index=False, sort=False).last()
-    d['Timestamp'] = d['Hora']
-    return (d[['Timestamp', 'Item', 'Price', 'Recomendacao_API']]
+    d = d[d['Price'] > 0]   # linha com preço ilegível (limpar_numero -> 0) não pode virar o "último preço" do balde
+    if d.empty:
+        return pd.DataFrame(columns=colunas)
+
+    freq = f'{PASSO_MIN}min'
+    d['Balde'] = d['Timestamp'].dt.floor(freq)
+    d = d.sort_values('Timestamp').groupby(['Item', 'Balde'], as_index=False, sort=False).last()
+
+    partes = []
+    for item, g in d.groupby('Item', sort=False):
+        g = g.set_index('Balde')[['Price', 'Recomendacao_API']]
+        grade = pd.date_range(g.index.min(), g.index.max(), freq=freq)
+        g = g.reindex(grade).ffill(limit=LIMITE_FFILL_REG)
+        g['Item'] = item
+        partes.append(g.rename_axis('Timestamp').reset_index())
+
+    return (pd.concat(partes, ignore_index=True)[colunas]
             .sort_values(['Item', 'Timestamp']).reset_index(drop=True))
 
 
 # Sobe quando o formato/lógica do cache muda — um cache salvo com versão
 # diferente é descartado e recalculado do zero (ver carregar_cache_indicadores).
-# v2: grade horária + Preco_Futuro/Peso_Temporal recalculados a cada ciclo.
-CACHE_VERSAO = 2
+# v2: Preco_Futuro/Peso_Temporal recalculados a cada ciclo.
+# v3: grade nativa de 15 min (janelas em tempo, lags em horas).
+CACHE_VERSAO = 3
 
 
 def carregar_cache_indicadores():
@@ -649,16 +693,18 @@ def _calcular_indicadores_do_zero(d_bruto_item, nome_item):
     )
     # Variação nas últimas 72h (3 dias) — alinhada ao ciclo máximo das
     # masterpieces, dá ao modelo um sinal direto desse tipo de evento.
-    d['Var_72h'] = d['Price'].pct_change(periods=JANELA_EVENTO_H) * 100
-    d['Lag_1'] = d['Price'].shift(1)
-    d['Lag_2'] = d['Price'].shift(2)
-    d['Lag_3'] = d['Price'].shift(3)
+    d['Var_72h'] = d['Price'].pct_change(periods=JANELA_EVENTO_REG, fill_method=None) * 100
+    # Lags em HORAS (1h/2h/3h atrás), não em linhas: assim a feature tem o mesmo
+    # significado no histórico horário (repetido na grade) e nos dados de 15 min.
+    d['Lag_1'] = d['Price'].shift(1 * REGISTROS_POR_HORA)
+    d['Lag_2'] = d['Price'].shift(2 * REGISTROS_POR_HORA)
+    d['Lag_3'] = d['Price'].shift(3 * REGISTROS_POR_HORA)
     d['Hora_Dia'] = d['Timestamp'].dt.hour
     d['Dia_Semana'] = d['Timestamp'].dt.dayofweek
     d['Preco_Futuro'] = d['Price'].shift(-SHIFT_ALVO)
 
     max_date = d['Timestamp'].max()
-    d['Peso_Temporal'] = d['Timestamp'].apply(lambda x: np.exp(-0.01 * (max_date - x).days))
+    d['Peso_Temporal'] = np.exp(-0.01 * (max_date - d['Timestamp']).dt.days)
 
     return d
 
@@ -667,7 +713,7 @@ def _atribuir_holdout(d):
     """Marca is_holdout (3 janelas de 72h) sobre o histórico completo — igual ao bot original."""
     d = d.copy()
     d['is_holdout'] = False
-    HOLDOUT_JANELA = JANELA_EVENTO_H   # 72h/3 dias — mesmo ciclo das masterpieces
+    HOLDOUT_JANELA = JANELA_EVENTO_REG   # 72h/3 dias (em linhas) — mesmo ciclo das masterpieces
     N_JANELAS_HOLDOUT = 3
     WARMUP_MACRO = MACRO_MIN_PERIODS
 
@@ -758,6 +804,13 @@ def montar_datasets_pooled(cache_indicadores):
         d_it['Item_Cat'] = item
         d_treino = d_it[~d_it['is_holdout']].dropna(subset=['Preco_Futuro'] + X_COLS_BASE)
         d_teste = d_it[d_it['is_holdout']].dropna(subset=['Preco_Futuro'] + X_COLS_BASE)
+        if TREINO_PASSO_MIN > PASSO_MIN:
+            # 1 linha a cada TREINO_PASSO_MIN min (ver constante): as linhas de uma
+            # mesma hora são quase cópias pro alvo de DIAS_SWING dias à frente.
+            def _so_passo(d):
+                minutos = d['Timestamp'].dt.hour * 60 + d['Timestamp'].dt.minute
+                return d[minutos % TREINO_PASSO_MIN == 0]
+            d_treino, d_teste = _so_passo(d_treino), _so_passo(d_teste)
         if len(d_treino) >= 50:
             frames_treino.append(d_treino)
         if not d_teste.empty:
@@ -802,6 +855,8 @@ def deve_retreinar_pooled():
     try:
         with open(MODELO_POOLED_META_PATH, "rb") as f:
             meta = pickle.load(f)
+        if meta.get("cache_versao") != CACHE_VERSAO:
+            return True   # modelo treinado com outra escala de dados: retreina
         ultimo_treino = meta.get("ultimo_treino")
         return ultimo_treino is None or (obter_agora_brt() - ultimo_treino).total_seconds() >= 86400
     except Exception:
@@ -814,6 +869,7 @@ def salvar_modelo_pooled(modelo, categorias, features_treino):
     with open(MODELO_POOLED_META_PATH, "wb") as f:
         pickle.dump({
             "ultimo_treino": obter_agora_brt(),
+            "cache_versao": CACHE_VERSAO,
             "categorias_item": list(categorias),
             "features_treino": list(features_treino),
         }, f)
@@ -826,6 +882,8 @@ def carregar_modelo_pooled():
         with open(MODELO_POOLED_META_PATH, "rb") as f:
             meta = pickle.load(f)
 
+        if meta.get("cache_versao") != CACHE_VERSAO:
+            return None, None
         features_esperadas = X_COLS_POOLED + ['Item_Cat']
         features_salvas = meta.get("features_treino")
         if features_salvas != features_esperadas:
@@ -912,10 +970,10 @@ df_bruto = pd.DataFrame([l[:4] for l in rec_data], columns=['Timestamp', 'Item',
 df_bruto['Price'] = df_bruto['Price'].apply(limpar_numero)
 df_bruto['Recomendacao_API'] = df_bruto['Recomendacao_API'].astype(str).str.strip().str.upper()
 
-# Coleta a cada 15 min -> 1 linha por item por hora (ver normalizar_grade_horaria)
+# Dados -> grade uniforme de PASSO_MIN min por item (ver normalizar_grade)
 n_linhas_dados = len(df_bruto)
-df_bruto = normalizar_grade_horaria(df_bruto)
-print(f"📥 Dados: {n_linhas_dados} registros lidos -> {len(df_bruto)} na grade horária.")
+df_bruto = normalizar_grade(df_bruto)
+print(f"📥 Dados: {n_linhas_dados} registros lidos -> {len(df_bruto)} linhas na grade de {PASSO_MIN} min.")
 
 # ==============================================================================
 # VALIDAÇÃO DE SINAIS (Sinais_IA — substitui Validacao_Sinais/Sinais_Hoje)
@@ -1026,14 +1084,16 @@ if not df_val.empty:
                 preco_monitoramento = df_pos_sinal['Price'].min() if not df_pos_sinal.empty else preco_sinal_v
 
             max_pos = df_pos_sinal['Price'].max() if not df_pos_sinal.empty else preco_sinal_v
-            horas_no_alvo = int((df_pos_sinal['Price'] >= ref_fin_v).sum()) if not df_pos_sinal.empty else 0
-            horas_venda = int((df_pos_sinal['Price'] <= ref_fin_v).sum()) if not df_pos_sinal.empty else 0
+            # Contagens em HORAS (linhas da grade / REGISTROS_POR_HORA): "3 horas no
+            # alvo" continua significando 3 horas, não 3 linhas de 15 min.
+            horas_no_alvo = ((df_pos_sinal['Price'] >= ref_fin_v).sum() / REGISTROS_POR_HORA) if not df_pos_sinal.empty else 0.0
+            horas_venda = ((df_pos_sinal['Price'] <= ref_fin_v).sum() / REGISTROS_POR_HORA) if not df_pos_sinal.empty else 0.0
 
             dias_ate_alvo = None
             if not df_pos_sinal.empty and pd.notnull(data_sinal_v):
                 qualifica = df_pos_sinal['Price'] >= ref_fin_v if tipo_v == "COMPRA" else df_pos_sinal['Price'] <= ref_fin_v
                 cum = qualifica.cumsum()
-                atingiu = cum[cum >= 3]
+                atingiu = cum[cum >= 3 * REGISTROS_POR_HORA]   # 3 horas no alvo
                 if not atingiu.empty:
                     ts_atingiu = df_pos_sinal.loc[atingiu.index[0], 'Timestamp']
                     dias_ate_alvo = round((ts_atingiu - data_sinal_v).total_seconds() / 86400, 2)
@@ -1299,6 +1359,9 @@ if linhas_ignoradas_dedup > 0:
     print(f"⚠️  {linhas_ignoradas_dedup} linha(s) de Sinais_IA ignorada(s) ao montar mapa_ultimo_sinal "
           f"(dado corrompido) — dedup de 4h/3% seguiu normal para as demais linhas.")
 
+agora_ciclo = obter_agora_brt()   # timestamp único do ciclo — reusado no snapshot Sinais_Hoje e no disparo de sinais
+linhas_sinais_hoje = []           # snapshot do estado atual de CADA item, sobrescrito por inteiro no fim do ciclo
+
 for item in df_ranking['Item']:
     d_it = cache_indicadores.get(item)
     if d_it is None or d_it.empty:
@@ -1351,8 +1414,27 @@ for item in df_ranking['Item']:
     if em_crash and "COMPRAR" in acao:
         acao = f"⚠️ COMPRAR (QUEDA {var24h:.1f}% em 24h)"
 
+    # --- Snapshot Sinais_Hoje: registra TODO item, dispare alerta ou não ---
+    recomendacao_raw_hoje = row.get('Recomendacao_API', '')
+    if "COMPRAR" in acao:
+        tipo_interpretado_hoje = "COMPRA"
+    elif "VENDER" in acao:
+        tipo_interpretado_hoje = "VENDA"
+    else:
+        tipo_interpretado_hoje = None
+    concorda_label_hoje = (
+        avaliar_concordancia_api(tipo_interpretado_hoje, recomendacao_raw_hoje)[0]
+        if tipo_interpretado_hoje else "N/A"
+    )
+    linhas_sinais_hoje.append([
+        agora_ciclo.strftime("%d/%m/%Y %H:%M"), item, round(preco_atual, 4), acao,
+        round(roi_pred_exibido, 2), round(row['Media_Macro'], 4),
+        round(alvo_in, 4), round(alvo_out, 4), recomendacao_raw_hoje, concorda_label_hoje,
+        estado_rl, "SIM" if em_crash else "NÃO"
+    ])
+
     if acao in ["🟢 COMPRAR", "🔴 VENDER"] or (em_crash and "COMPRAR" in acao):
-        agora_brt = obter_agora_brt()
+        agora_brt = agora_ciclo
         dt_hoje_str = agora_brt.strftime("%d%m%Y")
         dt_hhmm = agora_brt.strftime("%H%M")
         tipo_sinal = "COMPRA" if "COMPRAR" in acao else "VENDA"
@@ -1402,6 +1484,17 @@ if novas_linhas_sinais:
     ws_val.append_rows(novas_linhas_sinais, value_input_option='USER_ENTERED')
     print(f"📌 {len(novas_linhas_sinais)} novos sinais integrados para monitorização (Sinais_IA).")
 
+# --- Sinais_Hoje: dashboard do estado atual, sobrescrito por inteiro ---
+try:
+    ok_hoje = salvar_aba_atomica(
+        sh, "Sinais_Hoje", HEADERS_SINAIS_HOJE, linhas_sinais_hoje,
+        rows_est=len(linhas_sinais_hoje) + 50, cols_est=len(HEADERS_SINAIS_HOJE)
+    )
+    print(f"📸 Sinais_Hoje atualizada: {len(linhas_sinais_hoje)} itens." if ok_hoje
+          else "⚠️ Sinais_Hoje não foi atualizada neste ciclo — versão anterior preservada.")
+except Exception as e:
+    print(f"❌ Erro ao salvar Sinais_Hoje: {e}")
+
 # ==============================================================================
 # 5. PERSISTÊNCIA — XGB_Audit, Cerebro_RL, Cerebro_RL_Item
 # ==============================================================================
@@ -1431,7 +1524,8 @@ try:
         ws_audit.update(values=([header] + todas), range_name='A1', value_input_option='USER_ENTERED')
         print(f"📊 XGB_Audit: {len(audit_linhas)} novos | {len(todas)} retidos.")
     else:
-        print("📊 XGB_Audit: nenhum item com dados suficientes para auditoria.")
+        print("📊 XGB_Audit: sem retreino neste ciclo — nada a gravar." if not retreinou_neste_ciclo
+              else "📊 XGB_Audit: nenhum item com dados suficientes para auditoria.")
 except Exception as e:
     print(f"❌ Erro ao salvar XGB_Audit: {e}")
 
