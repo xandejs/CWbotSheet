@@ -105,7 +105,7 @@ SPREADSHEET_ID = "1NjtxK3HgsnT2DiI7NEEHS1NCrwcJAedqB4c4YDiBrbU"   # CRAFT WORLD
 ABA_DADOS = "Dados"    # equivalente ao RecLog do bot antigo — só leitura
 
 REGISTROS_POR_DIA = 24         # confirmado: 1 registro/hora
-TAXA_MARKETPLACE = 0.05        # confirmado: 5% — usado só pra calcular meta de venda acima da média, sem ligação com estoque
+TAXA_MARKETPLACE = 0.1        # confirmado: 5% — usado só pra calcular meta de venda acima da média, sem ligação com estoque
 
 # --- Ciclo de referência: masterpieces duram no máximo 3 dias ---
 JANELA_EVENTO_H = 3 * REGISTROS_POR_DIA   # 72 registros/horas — holdout do XGBoost e janela de auditoria usam esse ciclo
